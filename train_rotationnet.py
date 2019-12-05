@@ -133,7 +133,7 @@ def main():
         nview = 160
 
     if args.batch_size % nview != 0:
-        print 'Error: batch size should be multiplication of the number of views,', nview
+        print('Error: batch size should be multiplication of the number of views,', nview)
         exit()
 
     if args.distributed:
@@ -321,7 +321,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
                 target_[ n * nview * nview + vcand[ j_max ][ k ] * nview + k ] = target[ n * nview ]
         ###########################################
 
-        target_ = target_.cuda(async=True)
+        target_ = target_.cuda()
         target_var = torch.autograd.Variable(target_)
 
         # compute loss
@@ -357,7 +357,7 @@ def validate(val_loader, model, criterion):
 
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
-        target = target.cuda(async=True)
+        target = target.cuda()
         input_var = torch.autograd.Variable(input, volatile=True)
         target_var = torch.autograd.Variable(target, volatile=True)
 
