@@ -15,6 +15,7 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
 model_names = sorted(name for name in models.__dict__
@@ -58,11 +59,14 @@ parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
 parser.add_argument('--dist-backend', default='gloo', type=str,
                     help='distributed backend')
 parser.add_argument('--case', default='2', type=str,
-                    help='viewpoint setup case (1 or 2)')
+                    help='viewpoint setup case (1 (12 views), 2 (20 views), 3 (160 views) or 4 (2 views))')
+parser.add_argument('--logdir', default='logs/', type=str, help="Path for logdir (default: logs/)")
 
 best_prec1 = 0
 vcand = np.load('vcand_case2.npy')
 nview = 20
+train_summary = None
+
 
 class FineTuneModel(nn.Module):
     def __init__(self, original_model, arch, num_classes):
@@ -120,8 +124,10 @@ class FineTuneModel(nn.Module):
 
 
 def main():
-    global args, best_prec1, nview, vcand
+    global args, best_prec1, nview, vcand, train_summary
     args = parser.parse_args()
+
+    train_summary = SummaryWriter(args.logdir)
 
     args.distributed = args.world_size > 1
 
@@ -131,6 +137,9 @@ def main():
     elif args.case == '3':
         vcand = np.load('vcand_case3.npy')
         nview = 160
+    elif args.case == '4':
+        vcand = np.array([[0, 1], [1, 0]], dtype=np.int64)
+        nview = 2
 
     if args.batch_size % nview != 0:
         print('Error: batch size should be multiplication of the number of views,', nview)
@@ -250,7 +259,7 @@ def main():
         train(train_loader, model, criterion, optimizer, epoch)
 
         # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion)
+        prec1 = validate(val_loader, model, criterion, epoch)
 
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
@@ -302,7 +311,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
         # divide object scores by the scores for "incorrect view label" (see Eq.(5))
         output_ = output_[ :, :-1 ] - torch.t( output_[ :, -1 ].repeat( 1, output_.size(1)-1 ).view( output_.size(1)-1, -1 ) )
         # reshape output matrix
-        output_ = output_.view( -1, nview * nview, num_classes )
+        output_softmax = output_ = output_.view( -1, nview * nview, num_classes )
         output_ = output_.data.cpu().numpy()
         output_ = output_.transpose( 1, 2, 0 )
         # initialize target labels with "incorrect view label"
@@ -337,16 +346,26 @@ def train(train_loader, model, criterion, optimizer, epoch):
         batch_time.update(time.time() - end)
         end = time.time()
 
+        # measure accuracy and record loss
+        prec1, prec5 = my_accuracy(output_softmax.data, target.cuda(), topk=(1, 5))
+        top1.update(prec1.item(), input.size(0)/nview)
+        top5.update(prec5.item(), input.size(0)/nview)
+
         if i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})'.format(
+                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                  'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                    epoch, i, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses))
+                   data_time=data_time, loss=losses, top1=top1, top5=top5))
+
+    train_summary.add_scalar("Loss/Train", losses.avg, epoch)
+    train_summary.add_scalar("Accuracy/Train", top1.avg, epoch)
 
 
-def validate(val_loader, model, criterion):
+def validate(val_loader, model, criterion, epoch=None):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -393,6 +412,10 @@ def validate(val_loader, model, criterion):
 
     print(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
           .format(top1=top1, top5=top5))
+
+    if epoch is not None:
+        train_summary.add_scalar("Loss/Test", losses.avg, epoch)
+        train_summary.add_scalar("Accuracy/Test", top1.avg, epoch)
 
     return top1.avg
 
