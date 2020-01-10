@@ -237,7 +237,7 @@ def main():
     val_loader.dataset.imgs = sorted(val_loader.dataset.imgs)
 
     if args.evaluate:
-        validate(val_loader, model, criterion)
+        validate(val_loader, model, criterion, eval_log=True)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -365,11 +365,13 @@ def train(train_loader, model, criterion, optimizer, epoch):
     train_summary.add_scalar("Accuracy/Train", top1.avg, epoch)
 
 
-def validate(val_loader, model, criterion, epoch=None):
+def validate(val_loader, model, criterion, epoch=None, eval_log=False):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
+
+    eval_txt = ""
 
     # switch to evaluate mode
     model.eval()
@@ -401,6 +403,21 @@ def validate(val_loader, model, criterion, epoch=None):
         batch_time.update(time.time() - end)
         end = time.time()
 
+        if eval_log:
+            start_idx = i * val_loader.batch_size
+            sample_fnames = [fname[0] for fname in
+                             val_loader.dataset.samples[start_idx:start_idx+val_loader.batch_size]]
+            sample_names = [os.path.basename(sn).replace(".png", "") for sn in sample_fnames]
+            predictions = get_prediction(output.data, target)
+
+            for sample_idx in range(0, len(sample_names), nview):   # only one prediction per sample
+                batch_idx = int(sample_idx/2)
+                sample = sample_names[sample_idx].replace("_001", ".vehicle")
+                prediction = np.argmax(predictions[batch_idx])
+                lbl = target[batch_idx]
+
+                eval_txt += f"{sample}, {prediction}, {lbl}\n"
+
         if i % args.print_freq == 0:
             print('Test: [{0}/{1}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
@@ -416,6 +433,12 @@ def validate(val_loader, model, criterion, epoch=None):
     if epoch is not None:
         train_summary.add_scalar("Loss/Test", losses.avg, epoch)
         train_summary.add_scalar("Accuracy/Test", top1.avg, epoch)
+
+    if eval_log:
+        if not os.path.isdir("eval"):
+            os.makedirs("eval")
+        with open(os.path.join("eval", "pred_labels.csv"), "w") as eval_file:
+            eval_file.write(eval_txt)
 
     return top1.avg
 
@@ -498,6 +521,28 @@ def my_accuracy(output_, target, topk=(1,)):
         correct_k = correct[:k].view(-1).float().sum(0)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
+
+
+def get_prediction(output_, target):
+    """Computes the precision@k for the specified values of k"""
+    target = target[0:-1:nview]
+    batch_size = target.size(0)
+
+    num_classes = output_.size(2)
+    output_ = output_.cpu().numpy()
+    output_ = output_.transpose( 1, 2, 0 )
+    scores = np.zeros( ( vcand.shape[ 0 ], num_classes, batch_size ) )
+    output = torch.zeros( ( batch_size, num_classes ) )
+    # compute scores for all the candidate poses (see Eq.(6))
+    for j in range(vcand.shape[0]):
+        for k in range(vcand.shape[1]):
+            scores[ j ] = scores[ j ] + output_[ vcand[ j ][ k ] * nview + k ]
+    # for each sample #n, determine the best pose that maximizes the score (for the top class)
+    for n in range( batch_size ):
+        j_max = int( np.argmax( scores[ :, :, n ] ) / scores.shape[ 1 ] )
+        output[ n ] = torch.FloatTensor( scores[ j_max, :, n ] )
+
+    return output
 
 
 if __name__ == '__main__':
